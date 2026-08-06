@@ -6,6 +6,14 @@ aiofiles==23.2.1
 # File system monitoring
 watchdog==3.0.0
 
+# Persistent metadata catalog (async SQLite, raw SQL - no ORM)
+aiosqlite==0.22.1
+
+# Mutual authentication and AES-256-GCM transit encryption.
+# Not optional: NetworkManager refuses to start without either a pre-shared
+# key or an explicit --allow-insecure, and both paths import this module.
+cryptography>=41.0.0
+
 # Testing
 pytest==7.4.3
 pytest-asyncio==0.21.1
@@ -13,3 +21,13 @@ pytest-cov==4.1.0
 
 # Type hints (optional but recommended)
 typing-extensions==4.8.0
+
+# ---------------------------------------------------------------------------
+# FUSE mode is Linux-only and lives in requirements-fuse.txt, not here.
+#
+# pyfuse3 is a compiled extension against libfuse3 with no Windows build, so
+# listing it above would break `pip install -r requirements.txt` on the very
+# platform daemon mode has to keep working on. Daemon mode never imports it
+# (app/fuse/__init__.py defers the import), so the split is real rather than
+# cosmetic.
+# ---------------------------------------------------------------------------

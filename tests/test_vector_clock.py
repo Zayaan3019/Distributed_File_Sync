@@ -32,17 +32,76 @@ class TestVectorClock:
         assert clock.clock["node1"] == 0
     
     def test_merge(self):
-        """Test merging two clocks."""
+        """Test merging two clocks takes the element-wise maximum."""
         clock1 = VectorClock("node1")
         clock1.increment()  # node1: 1
-        
+
         clock2 = VectorClock("node2")
         clock2.increment()  # node2: 1
-        
+
         clock1.merge(clock2)
-        # After merge, node1 should have: {node1: 2, node2: 1}
-        assert clock1.clock["node1"] == 2  # Incremented after merge
+        # merge() is a pure element-wise max: receiving a message is not a
+        # local event, so node1's own counter must not tick.
+        assert clock1.clock["node1"] == 1
         assert clock1.clock["node2"] == 1
+
+    def test_merge_and_tick(self):
+        """merge_and_tick() merges and then records a local event."""
+        clock1 = VectorClock("node1")
+        clock1.increment()  # node1: 1
+
+        clock2 = VectorClock("node2")
+        clock2.increment()  # node2: 1
+
+        clock1.merge_and_tick(clock2)
+        assert clock1.clock["node1"] == 2
+        assert clock1.clock["node2"] == 1
+
+    def test_merge_converges_to_equal(self):
+        """Two peers exchanging clocks must converge, not ping-pong.
+
+        Regression test: merge() used to increment the merger's own counter,
+        which made the receiver strictly AFTER the sender. The receiver would
+        then advertise a "newer" version back and the pair would never settle.
+        """
+        a = VectorClock("A")
+        b = VectorClock("B")
+
+        a.increment()          # A edits a file
+        assert a.compare(b) == ClockRelation.AFTER
+
+        b.merge(a)             # B receives A's clock
+        assert b.compare(a) == ClockRelation.EQUAL
+
+        a.merge(b)             # and back again: still settled
+        assert a.compare(b) == ClockRelation.EQUAL
+
+    def test_merge_preserves_concurrent_detection(self):
+        """Plain-max merge must not mask genuine concurrent edits."""
+        a = VectorClock("A")
+        b = VectorClock("B")
+        a.increment()
+        b.increment()
+
+        assert a.compare(b) == ClockRelation.CONCURRENT
+
+        # Both peers resolve the same conflict independently and converge.
+        a_resolved, b_resolved = a.copy(), b.copy()
+        a_resolved.merge(b)
+        b_resolved.merge(a)
+        assert a_resolved.compare(b_resolved) == ClockRelation.EQUAL
+
+    def test_merge_is_idempotent(self):
+        """Merging the same clock twice changes nothing the second time."""
+        a = VectorClock("A")
+        a.increment()
+        b = VectorClock("B")
+        b.increment()
+
+        a.merge(b)
+        snapshot = dict(a.clock)
+        a.merge(b)
+        assert a.clock == snapshot
     
     def test_compare_equal(self):
         """Test comparing equal clocks."""

@@ -4,6 +4,15 @@
 
 This document summarizes the implementation of the **Production-Grade Distributed File Sync Engine** in Python.
 
+> **Scope note.** This summary describes the project as it stood before the
+> FUSE and security work, and parts of it are now out of date — notably the
+> test counts and anything implying the transport is unauthenticated. Current
+> sources of truth: `README.md` (usage and consistency model),
+> `docs/SECURITY_AUDIT.md` (security, before and after),
+> `docs/FUSE_DESIGN.md` (FUSE design and its deviations),
+> `artifacts/fuse_benchmark.md` (measured performance and POSIX conformance),
+> `VERIFICATION.md` (corrected test inventory).
+
 ---
 
 ## ✅ Completed Components
@@ -107,18 +116,21 @@ This document summarizes the implementation of the **Production-Grade Distribute
 
 ### 5. Testing Suite (`tests/`)
 
-#### ✅ Test Coverage
-- `test_vector_clock.py`: 20+ test cases
-- `test_merkle_tree.py`: 15+ test cases
-- `test_protocol.py`: 10+ test cases
-- `conftest.py`: Pytest configuration and fixtures
+#### ✅ Test Coverage — **297 tests across 14 files**
+
+Per-file breakdown in `VERIFICATION.md`. Observed results:
+
+```
+Windows:  272 passed, 25 skipped   (FUSE skipped: no /dev/fuse)
+WSL2:     290 passed,  7 skipped   (Docker skipped: no daemon in that distro)
+```
 
 **Features**:
-- Async test support (pytest-asyncio)
-- Comprehensive unit tests
-- Integration test examples
-- Mock configurations
-- Cleanup fixtures
+- Async test support (pytest-asyncio, `asyncio_mode = auto`)
+- FUSE tested against **real mounts**, not mocks
+- Two-peer convergence tested over **real sockets**, and again in **real
+  containers** with a genuine network partition
+- Cleanup fixtures; per-test port allocation
 
 ### 6. Documentation
 
@@ -192,10 +204,9 @@ This document summarizes the implementation of the **Production-Grade Distribute
 ## 📊 Statistics
 
 ### Code Metrics
-- **Total Lines of Code**: ~3,500+ lines
-- **Number of Files**: 25+
-- **Test Coverage**: Core algorithms 90%+
-- **Documentation**: 1,600+ lines
+- **Tests**: 297 across 14 files (272 pass on Windows, 290 under WSL2)
+- **Documentation**: `README.md`, `docs/FUSE_DESIGN.md`,
+  `docs/SECURITY_AUDIT.md`, `artifacts/fuse_benchmark.md`
 
 ### Features Implemented
 - ✅ Merkle Tree-based bandwidth optimization

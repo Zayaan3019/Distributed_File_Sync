@@ -155,3 +155,6 @@ Thumbs.db
 
 # Docker
 docker-compose.override.yml
+
+# Claude Code local settings
+.claude/settings.local.json

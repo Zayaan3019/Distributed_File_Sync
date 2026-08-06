@@ -14,79 +14,115 @@ Distributed_File_Sync/
 │   │
 │   ├── core/                           # Core infrastructure
 │   │   ├── __init__.py                # Core exports
-│   │   ├── config.py                  # Configuration management (280 lines)
-│   │   ├── protocol.py                # Binary protocol (380 lines)
-│   │   └── logger.py                  # Async logging (150 lines)
+│   │   ├── config.py                  # Configuration management
+│   │   ├── protocol.py                # Length-prefixed message protocol
+│   │   ├── security.py                # PSK auth, AES-GCM, path sanitisation
+│   │   ├── catalog.py                 # SQLite catalog (aiosqlite, WAL)
+│   │   └── logger.py                  # Async logging
+│   │
+│   ├── fuse/                           # FUSE mode -- Linux only
+│   │   ├── __init__.py                # Defers pyfuse3 import so this
+│   │   │                              #   package imports on Windows
+│   │   ├── operations.py              # pyfuse3 read + write handlers
+│   │   ├── mount.py                   # trio/asyncio boundary, session thread
+│   │   ├── inodes.py                  # Inodes stable across remounts
+│   │   └── attrcache.py               # Attribute cache
 │   │
 │   └── services/                       # Service layer
 │       ├── __init__.py                # Service exports
-│       ├── network.py                 # Network manager (480 lines)
-│       ├── file_monitor.py            # File monitoring (320 lines)
-│       └── sync_engine.py             # Sync orchestration (520 lines)
+│       ├── network.py                 # TCP, auth, reconnect supervision
+│       ├── file_monitor.py            # Watchdog -> asyncio bridge
+│       └── sync_engine.py             # Sync orchestration
 │
-├── tests/                              # Test suite
-│   ├── __init__.py                    # Test package init
-│   ├── conftest.py                    # Pytest configuration
-│   ├── test_vector_clock.py           # Vector clock tests (20+ tests)
-│   ├── test_merkle_tree.py            # Merkle tree tests (15+ tests)
-│   └── test_protocol.py               # Protocol tests (10+ tests)
+├── benchmarks/
+│   └── fuse_benchmark.py               # Phase 6 measurement harness
+│
+├── scripts/
+│   ├── wsl_sync.sh                     # Copy checkout to ext4 for FUSE work
+│   ├── fuse_smoke.sh                   # DoD #1: real ls/cat/cp/vim/git/df
+│   └── pjdfstest.sh                    # POSIX conformance run
+│
+├── artifacts/
+│   └── fuse_benchmark.md               # Measured results
+│
+├── docs/
+│   ├── FUSE_DESIGN.md                  # Design decisions and deviations
+│   └── SECURITY_AUDIT.md               # Pre-hardening findings + transcripts
+│
+├── tests/                              # Test suite -- 297 tests, 14 files
+│   ├── __init__.py
+│   ├── conftest.py
+│   ├── test_security.py               # 70 -- auth, crypto, path traversal
+│   ├── test_catalog.py                # 53 -- catalog, WAL, crash recovery
+│   ├── test_fuse.py                   # 41 -- against REAL mounts (Linux)
+│   ├── test_two_node.py               # 23 -- two peers over real sockets
+│   ├── test_vector_clock.py           # 19
+│   ├── test_merkle_diff.py            # 15
+│   ├── test_tombstones.py             # 13
+│   ├── test_merkle_tree.py            # 12
+│   ├── test_transfer_integrity.py     # 10 -- atomic apply, partial transfers
+│   ├── test_file_monitor.py           #  9 -- debounce coalescing
+│   ├── test_persistence.py            #  9
+│   ├── test_sync_engine.py            #  8
+│   ├── test_protocol.py               #  8
+│   └── test_docker_two_node.py        #  7 -- real containers, real partition
 │
 ├── logs/                               # Log directory (generated at runtime)
 │   └── file_sync.log                  # Application logs
 │
-├── data/                               # Data directory for Docker volumes
-│   ├── node1/                         # Node 1 sync directory
-│   ├── node2/                         # Node 2 sync directory
-│   └── node3/                         # Node 3 sync directory
+├── README.md                           # Main documentation
+├── QUICKSTART.md                       # Quick start guide
+├── ARCHITECTURE.md                     # Technical deep dive
+├── PROJECT_SUMMARY.md                  # Implementation summary (pre-FUSE)
+├── VERIFICATION.md                     # Corrected test inventory
 │
-├── README.md                           # Main documentation (600+ lines)
-├── QUICKSTART.md                       # Quick start guide (300+ lines)
-├── ARCHITECTURE.md                     # Technical deep dive (700+ lines)
-├── PROJECT_SUMMARY.md                  # Implementation summary
-│
-├── examples.py                         # Usage examples (400+ lines)
+├── examples.py                         # Usage examples
 │
 ├── requirements.txt                    # Python dependencies
+├── requirements-fuse.txt               # FUSE extras -- Linux only
 ├── pyproject.toml                      # Pytest configuration
 ├── .gitignore                          # Git ignore rules
 │
 ├── Dockerfile                          # Container definition
-└── docker-compose.yml                  # Multi-node orchestration
+└── docker-compose.yml                  # Two-node cluster for the
+                                        #   integration test
 
 ```
 
-## File Count Summary
+Docker node data lives in **named volumes**, not `./data/`. The catalog is
+SQLite in WAL mode, whose shared-memory locking a bind mount from a Windows
+host does not reliably provide.
 
-### Source Code
-- **Python Files**: 16 files
-- **Total Lines of Code**: ~3,500 lines
-- **Documentation**: ~1,600 lines
+## Breakdown by Directory
 
-### Breakdown by Directory
+#### `app/algorithms/` (2 files)
+- Vector Clock: distributed causality tracking
+- Merkle Tree: bandwidth-optimised sync, leaf-only wire encoding
 
-#### `app/algorithms/` (2 files, ~700 lines)
-- Vector Clock: Distributed causality tracking
-- Merkle Tree: Bandwidth-optimized sync
+#### `app/core/` (5 files)
+- Config: configuration management
+- Protocol: length-prefixed message protocol, version negotiation
+- Security: PSK authentication, AES-256-GCM, path sanitisation
+- Catalog: SQLite metadata store (aiosqlite, WAL)
+- Logger: structured logging
 
-#### `app/core/` (3 files, ~810 lines)
-- Config: Configuration management
-- Protocol: Binary message protocol
-- Logger: Structured logging
+#### `app/fuse/` (4 files, Linux only)
+- Operations: pyfuse3 read and write handlers
+- Mount: trio/asyncio boundary and the FUSE session thread
+- Inodes: inode allocation stable across remounts
+- AttrCache: attribute caching
 
-#### `app/services/` (3 files, ~1,320 lines)
-- Network: Async TCP communication
-- File Monitor: File system watching
-- Sync Engine: Core synchronization logic
+#### `app/services/` (3 files)
+- Network: async TCP, authentication, reconnection supervision
+- File Monitor: watchdog → asyncio bridge with coalescing debounce
+- Sync Engine: core synchronisation logic
 
-#### `app/main.py` (380 lines)
-- Application bootstrapping
-- CLI argument parsing
-- Component lifecycle management
+#### `app/main.py`
+- Application bootstrapping, CLI parsing, component lifecycle
+- Background loops: tombstone GC, stalled-transfer reaper
 
-#### `tests/` (4 files, ~600 lines)
-- Comprehensive test coverage
-- Unit and integration tests
-- Pytest configuration
+#### `tests/` (14 files, 297 tests)
+- Real mounts, real sockets, real containers — see `VERIFICATION.md`
 
 ### Documentation Files
 - **README.md**: 600+ lines

@@ -19,6 +19,24 @@ pip install -r requirements.txt
 
 ## Quick Test - Two Node Setup
 
+> **Both nodes need the same `--psk`.** A node refuses to start without either
+> a pre-shared key or an explicit `--allow-insecure`; see the Security section
+> of `README.md` for why.
+>
+> **If the handshake fails, check the port before you check the key.** Ports
+> 8001/8002 are popular, and on Windows `localhost` resolves to `::1` first —
+> so a node can bind `127.0.0.1:8001` successfully while `--peer
+> localhost:8001` reaches an entirely different service listening on `[::]`.
+> The symptom is an authentication failure that has nothing to do with your
+> key. Use explicit `127.0.0.1` addresses, and pick ports nothing else wants:
+>
+> ```bash
+> # Windows
+> netstat -ano | findstr :8001
+> # Linux/Mac
+> ss -ltn | grep 8001
+> ```
+
 ### Terminal 1: Start Node 1
 
 ```bash
@@ -26,7 +44,8 @@ python -m app.main \
   --node-id node1 \
   --dir ./sync_node1 \
   --port 8001 \
-  --peer localhost:8002
+  --peer localhost:8002 \
+  --psk demo-shared-key
 ```
 
 ### Terminal 2: Start Node 2
@@ -36,7 +55,8 @@ python -m app.main \
   --node-id node2 \
   --dir ./sync_node2 \
   --port 8002 \
-  --peer localhost:8001
+  --peer localhost:8001 \
+  --psk demo-shared-key
 ```
 
 ### Test the Sync
@@ -106,7 +126,8 @@ python -m app.main \
   --dir ~/Documents/Sync \
   --host 0.0.0.0 \
   --port 8001 \
-  --peer 192.168.1.101:8001
+  --peer 192.168.1.101:8001 \
+  --psk your-shared-key
 ```
 
 **Computer 2 (192.168.1.101):**
@@ -116,7 +137,8 @@ python -m app.main \
   --dir ~/Documents/Sync \
   --host 0.0.0.0 \
   --port 8001 \
-  --peer 192.168.1.100:8001
+  --peer 192.168.1.100:8001 \
+  --psk your-shared-key
 ```
 
 ### Example 2: Configuration File
@@ -179,6 +201,7 @@ python -m app.main \
   --node-id debug-node \
   --dir ./sync \
   --port 8001 \
+  --psk demo-shared-key \
   --log-level DEBUG
 ```
 

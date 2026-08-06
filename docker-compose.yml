@@ -1,74 +1,57 @@
-# Docker Compose for Multi-Node Setup
-# This demonstrates a 3-node distributed sync cluster
-
-version: '3.8'
+# Two-node cluster backing the Definition-of-Done #2 integration test.
+#
+# Two nodes, not three. The property being demonstrated -- concurrent edits on
+# both sides converging, with the loser surfaced as a visible conflict sibling
+# -- is pairwise, and a third node adds transfer traffic without adding a case.
+# `tests/test_docker_two_node.py` drives this file.
+#
+# SYNC_PSK is mandatory. NetworkManager refuses to construct without either a
+# pre-shared key or an explicit --allow-insecure, so the previous version of
+# this file -- which predated the security layer and passed neither -- defined
+# containers that would die on the first line of startup. The value here is a
+# fixed test key and is not a secret; a real deployment supplies its own.
+#
+# `version:` is omitted deliberately; Compose v2 warns that it is obsolete.
 
 services:
-  # Node 1
   node1:
     build: .
-    container_name: sync_node1
+    container_name: dfs_node1
     environment:
-      - SYNC_NODE_ID=node1
-      - SYNC_DIRECTORY=/sync
-      - SYNC_LISTEN_HOST=0.0.0.0
-      - SYNC_LISTEN_PORT=8000
-      - SYNC_PEERS=node2:8000,node3:8000
+      - SYNC_PSK=${SYNC_PSK:-docker-integration-preshared-key}
+      - PYTHONUNBUFFERED=1
     volumes:
-      - ./data/node1:/sync
-      - ./logs/node1:/app/logs
-    ports:
-      - "8001:8000"
+      - node1_data:/sync
     networks:
       - sync_network
-    command: --node-id node1 --dir /sync --host 0.0.0.0 --port 8000 --peer node2:8000 --peer node3:8000 --log-level INFO
-    restart: unless-stopped
+    command: >
+      --node-id node1 --dir /sync --host 0.0.0.0 --port 8000
+      --peer node2:8000 --log-level INFO
+    restart: "no"
 
-  # Node 2
   node2:
     build: .
-    container_name: sync_node2
+    container_name: dfs_node2
     environment:
-      - SYNC_NODE_ID=node2
-      - SYNC_DIRECTORY=/sync
-      - SYNC_LISTEN_HOST=0.0.0.0
-      - SYNC_LISTEN_PORT=8000
-      - SYNC_PEERS=node1:8000,node3:8000
+      - SYNC_PSK=${SYNC_PSK:-docker-integration-preshared-key}
+      - PYTHONUNBUFFERED=1
     volumes:
-      - ./data/node2:/sync
-      - ./logs/node2:/app/logs
-    ports:
-      - "8002:8000"
+      - node2_data:/sync
     networks:
       - sync_network
-    command: --node-id node2 --dir /sync --host 0.0.0.0 --port 8000 --peer node1:8000 --peer node3:8000 --log-level INFO
-    restart: unless-stopped
-
-  # Node 3
-  node3:
-    build: .
-    container_name: sync_node3
-    environment:
-      - SYNC_NODE_ID=node3
-      - SYNC_DIRECTORY=/sync
-      - SYNC_LISTEN_HOST=0.0.0.0
-      - SYNC_LISTEN_PORT=8000
-      - SYNC_PEERS=node1:8000,node2:8000
-    volumes:
-      - ./data/node3:/sync
-      - ./logs/node3:/app/logs
-    ports:
-      - "8003:8000"
-    networks:
-      - sync_network
-    command: --node-id node3 --dir /sync --host 0.0.0.0 --port 8000 --peer node1:8000 --peer node2:8000 --log-level INFO
-    restart: unless-stopped
+    command: >
+      --node-id node2 --dir /sync --host 0.0.0.0 --port 8000
+      --peer node1:8000 --log-level INFO
+    restart: "no"
 
 networks:
   sync_network:
     driver: bridge
 
+# Named volumes rather than host bind mounts. The catalog is SQLite in WAL
+# mode, and WAL relies on shared-memory locking that a bind mount from a
+# Windows host does not reliably provide. A named volume keeps the database on
+# the Linux VM's own filesystem, where the locking primitives are real.
 volumes:
   node1_data:
   node2_data:
-  node3_data:

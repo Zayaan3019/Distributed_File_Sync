@@ -2,6 +2,22 @@
 
 This document verifies that all required components have been implemented according to the specification.
 
+> **Scope note.** This file records the state of the project *before* the FUSE
+> and security work. Several claims below were accurate then and are wrong now
+> — most importantly the test inventory (it listed 3 files; there are 14) and
+> the security section (it described a system with no authentication and no
+> encryption; there is now both, and it is on by default).
+>
+> The corrected inventory is in "Testing Verification" below. For everything
+> else the current sources of truth are:
+>
+> | Topic | Authority |
+> |---|---|
+> | Security posture, before and after | `docs/SECURITY_AUDIT.md` |
+> | FUSE design, deviations, open limits | `docs/FUSE_DESIGN.md` |
+> | Measured performance and POSIX conformance | `artifacts/fuse_benchmark.md` |
+> | How to run it | `README.md` |
+
 ---
 
 ## 📋 Requirements Verification
@@ -178,20 +194,40 @@ This document verifies that all required components have been implemented accord
 
 ## 🧪 Testing Verification
 
-### Test Files Created
+### Test inventory — corrected, 297 tests across 14 files
 
-| Test File | Tests | Coverage | Status |
-|-----------|-------|----------|--------|
-| `test_vector_clock.py` | 20+ | Core logic | ✅ |
-| `test_merkle_tree.py` | 15+ | Core logic | ✅ |
-| `test_protocol.py` | 10+ | Serialization | ✅ |
-| `conftest.py` | N/A | Fixtures | ✅ |
+| Test File | Tests | What it covers |
+|-----------|------:|----------------|
+| `test_security.py` | 70 | Path sanitisation, PSK handshake, AES-GCM framing, replay |
+| `test_catalog.py` | 53 | SQLite catalog, WAL, atomic clock updates, crash recovery |
+| `test_fuse.py` | 41 | FUSE handlers **against real mounts** (Linux only) |
+| `test_two_node.py` | 23 | Two real peers over loopback: convergence, conflicts, reconnect |
+| `test_vector_clock.py` | 19 | Causality, merge semantics, concurrency detection |
+| `test_merkle_diff.py` | 15 | Chunk-level diffing, including the adjacent-duplicate case |
+| `test_tombstones.py` | 13 | Deletion tombstones, resurrection prevention, GC |
+| `test_merkle_tree.py` | 12 | Tree construction, leaf-only wire encoding |
+| `test_transfer_integrity.py` | 10 | Atomic apply, partial-transfer safety, verification |
+| `test_file_monitor.py` | 9 | Watchdog→asyncio bridge, debounce coalescing |
+| `test_persistence.py` | 9 | State surviving restart |
+| `test_sync_engine.py` | 8 | Engine orchestration |
+| `test_protocol.py` | 8 | Serialisation, version negotiation, unknown-type tolerance |
+| `test_docker_two_node.py` | 7 | Real containers via `docker compose`, incl. network partition |
+
+Observed results, both platforms:
+
+```
+Windows:  272 passed, 25 skipped   (FUSE skipped: no /dev/fuse)
+WSL2:     290 passed,  7 skipped   (Docker skipped: no daemon in that distro)
+```
+
+Nothing is silently excluded. Every test that cannot run on a platform skips
+with a stated reason, so the counts describe what was actually verified.
 
 **Testing Infrastructure**:
-- ✅ pytest configured
-- ✅ pytest-asyncio for async tests
-- ✅ Mock configurations
-- ✅ Cleanup fixtures
+- ✅ pytest + pytest-asyncio, `asyncio_mode = auto`
+- ✅ Real mounts, real sockets, real containers — FUSE and networking are
+      exercised end to end rather than mocked
+- ✅ Cleanup fixtures; per-test port allocation
 - ✅ Coverage support
 
 ---

@@ -482,14 +482,40 @@ Example: 1GB file, 10MB changed:
 ## Future Enhancements
 
 ### 1. Security
-- TLS/SSL encryption
-- Certificate-based authentication
-- Access control lists
+
+Since implemented — see `app/core/security.py` and `docs/SECURITY_AUDIT.md`:
+
+- ✅ Encryption in transit (AES-256-GCM, per-connection and per-direction keys)
+- ✅ Mutual authentication (HMAC challenge/response over a PBKDF2-stretched
+  pre-shared key)
+- ✅ Path sanitisation on every received filename, with containment re-checked
+  after symlink resolution
+
+Still outstanding:
+
+- Certificate-based authentication / mTLS, so peers can be revoked
+  individually instead of by rotating one shared key everywhere
+- Access control lists — every authenticated peer can currently read and write
+  every synced path
+- Encryption at rest
 
 ### 2. Performance
+
+The measured numbers in `artifacts/fuse_benchmark.md` make the priority order
+concrete rather than speculative:
+
+- **Descend the Merkle tree instead of shipping its leaves.** Measured: a
+  1-byte edit in a 100MB file costs 1.67MB on the wire, of which **98.2% is
+  the hex-encoded leaf-hash list** and 0.3% is data. Exchanging the root and
+  recursing only into differing subtrees would make that ~2KB. This is the
+  single highest-value change in the project.
+- **Raw digests instead of hex** in the tree encoding — ~38% off the above for
+  a serialisation change alone.
+- **Batch chunks per message, and stop base64-ing payloads inside JSON.**
+  Measured: a first-time 100MB transfer over *loopback* runs at 2.5 MB/s
+  across 25,600 separately framed and encrypted messages.
 - Parallel chunk transfers
 - Compression (gzip/lz4)
-- Binary protocol for chunks
 - Memory-mapped file I/O
 
 ### 3. Features

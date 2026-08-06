@@ -73,11 +73,18 @@ class VectorClock:
     def merge(self, other: 'VectorClock') -> None:
         """
         Merge another vector clock into this one (take element-wise maximum).
-        
+
         This implements the merge rule for vector clocks: for each node,
         take the maximum timestamp between this clock and the other.
         This should be called when receiving a message from another node.
-        
+
+        Merging does NOT increment this node's counter. Receiving a message is
+        not a local event, and ticking here would make the receiver strictly
+        AFTER the sender, so the receiver would immediately advertise a "newer"
+        version back and the two peers would never converge to EQUAL. Callers
+        that are also performing a local event should call increment()
+        explicitly, or use merge_and_tick().
+
         Args:
             other: The vector clock to merge with this one.
         """
@@ -87,8 +94,20 @@ class VectorClock:
                 self.clock[node] = timestamp
             else:
                 self.clock[node] = max(self.clock[node], timestamp)
-        
-        # After merging, increment our own counter for the merge event
+
+    def merge_and_tick(self, other: 'VectorClock') -> None:
+        """
+        Merge another clock and then record a local event.
+
+        Use this only when receiving the remote clock and performing a local
+        mutation are genuinely the same event (for example, resolving a
+        conflict by writing a merged version). For a plain receive, use
+        merge().
+
+        Args:
+            other: The vector clock to merge with this one.
+        """
+        self.merge(other)
         self.increment()
     
     def compare(self, other: 'VectorClock') -> ClockRelation:

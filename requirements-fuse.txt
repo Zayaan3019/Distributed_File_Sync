@@ -1,0 +1,21 @@
+# FUSE mode dependencies -- Linux only.
+#
+# Install the system libraries first, otherwise the pyfuse3 wheel has nothing
+# to build against:
+#
+#     sudo apt install libfuse3-dev fuse3 pkg-config
+#     pip install -r requirements.txt -r requirements-fuse.txt
+#
+# Neither package works on Windows. Daemon mode (--fuse-mount omitted) runs
+# without them on every platform.
+
+-r requirements.txt
+
+# The FUSE binding. Chosen over fusepy because fusepy is unmaintained,
+# synchronous, and would force a thread pool in front of an async engine --
+# see docs/FUSE_DESIGN.md section 2.
+pyfuse3>=3.3.0
+
+# pyfuse3's event loop. Not interchangeable with asyncio, which is why the
+# FUSE session gets its own thread; see app/fuse/mount.py.
+trio>=0.24.0

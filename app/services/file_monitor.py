@@ -9,7 +9,8 @@ event-driven file monitoring.
 import asyncio
 import logging
 from pathlib import Path
-from typing import Callable, Awaitable, Set
+import threading
+from typing import Callable, Awaitable, Dict, Set
 from watchdog.observers import Observer
 from watchdog.events import (
     FileSystemEventHandler,
@@ -67,8 +68,11 @@ class AsyncFileMonitor(FileSystemEventHandler):
             '__pycache__', '.pyc', '_conflict'
         }
         
-        # Debounce rapid events (track recent events)
-        self._recent_events: Set[str] = set()
+        # Debounce rapid events. Maps event key -> "another event for this key
+        # arrived while the window was open", which is what makes the debounce
+        # coalescing rather than lossy. See `_schedule_callback`.
+        self._pending: Dict[str, bool] = {}
+        self._pending_lock = threading.Lock()
         self._debounce_delay = 0.5  # seconds
     
     def _should_ignore(self, file_path: str) -> bool:
@@ -117,31 +121,90 @@ class AsyncFileMonitor(FileSystemEventHandler):
         except ValueError:
             return file_path
     
-    def _schedule_callback(self, coro: Awaitable[None], event_key: str) -> None:
+    def _schedule_callback(self, make_coro: Callable[[], Awaitable[None]],
+                           event_key: str) -> None:
         """
-        Schedule an async callback with debouncing.
-        
+        Schedule an async callback, coalescing bursts for the same path.
+
+        Editors and build tools produce several events per logical save, so
+        some debouncing is required or every save costs multiple full hashes.
+        The previous implementation debounced by *dropping* the later event,
+        which loses writes: a file modified twice inside the window was hashed
+        once, at whatever content it held the first time, and the second edit
+        never propagated at all. It also built the coroutine before deciding
+        to drop it, so every debounced event leaked an un-awaited coroutine --
+        visible as `RuntimeWarning: coroutine 'SyncEngine.on_file_changed' was
+        never awaited` in the container logs, which is how this was found.
+
+        The window is now trailing-edge: a duplicate arriving mid-window sets a
+        dirty flag instead of being discarded, and one more run is scheduled
+        when the window closes. The last state of the file is therefore always
+        processed, at the cost of at most one extra pass.
+
         Args:
-            coro: Coroutine to schedule.
-            event_key: Unique key for this event (for debouncing).
+            make_coro: Zero-argument factory producing a *fresh* coroutine.
+                A factory rather than a coroutine because a dropped or
+                re-scheduled event must not reuse an already-created one.
+            event_key: Key identifying this event for coalescing.
         """
-        # Skip if we recently processed this event
-        if event_key in self._recent_events:
-            logger.debug(f"Debouncing event: {event_key}")
+        with self._pending_lock:
+            if event_key in self._pending:
+                # A run is already in flight for this path. Remember that the
+                # file changed again so we re-run once the window closes.
+                self._pending[event_key] = True
+                logger.debug(f"Coalescing event: {event_key}")
+                return
+            self._pending[event_key] = False
+
+        self._submit(make_coro())
+
+        # call_later is not thread-safe and watchdog calls us from the
+        # observer thread, so the timer has to be armed from inside the loop.
+        def arm() -> None:
+            self.event_loop.call_later(
+                self._debounce_delay, self._window_closed, event_key, make_coro
+            )
+
+        try:
+            self.event_loop.call_soon_threadsafe(arm)
+        except RuntimeError:
+            # Loop is shutting down; drop the timer and the bookkeeping.
+            with self._pending_lock:
+                self._pending.pop(event_key, None)
+
+    def _window_closed(self, event_key: str,
+                       make_coro: Callable[[], Awaitable[None]]) -> None:
+        """
+        Close a debounce window, re-running once if the path changed again.
+
+        Args:
+            event_key: The key whose window expired.
+            make_coro: Factory for another run, if one is owed.
+        """
+        with self._pending_lock:
+            dirty = self._pending.pop(event_key, False)
+
+        if dirty:
+            logger.debug(f"Re-running coalesced event: {event_key}")
+            self._schedule_callback(make_coro, event_key)
+
+    def _submit(self, coro: Awaitable[None]) -> None:
+        """
+        Hand a coroutine to the engine's event loop from the observer thread.
+
+        Args:
+            coro: Coroutine to run. Closed rather than leaked if the loop is
+                already gone, so shutdown stays quiet.
+        """
+        if self.event_loop.is_closed():
+            coro.close()
             return
-        
-        # Mark event as recent
-        self._recent_events.add(event_key)
-        
-        # Schedule the coroutine
-        asyncio.run_coroutine_threadsafe(coro, self.event_loop)
-        
-        # Clear event from recent after delay
-        def clear_event():
-            self._recent_events.discard(event_key)
-        
-        self.event_loop.call_later(self._debounce_delay, clear_event)
-    
+        try:
+            asyncio.run_coroutine_threadsafe(coro, self.event_loop)
+        except RuntimeError:
+            coro.close()
+
+
     def on_created(self, event: FileCreatedEvent) -> None:
         """
         Handle file creation event.
@@ -155,8 +218,9 @@ class AsyncFileMonitor(FileSystemEventHandler):
         file_path = self._get_relative_path(event.src_path)
         logger.info(f"File created: {file_path}")
         
-        coro = self.on_file_changed(file_path)
-        self._schedule_callback(coro, f"created:{file_path}")
+        self._schedule_callback(
+            lambda: self.on_file_changed(file_path), f"changed:{file_path}"
+        )
     
     def on_modified(self, event: FileModifiedEvent) -> None:
         """
@@ -171,8 +235,11 @@ class AsyncFileMonitor(FileSystemEventHandler):
         file_path = self._get_relative_path(event.src_path)
         logger.info(f"File modified: {file_path}")
         
-        coro = self.on_file_changed(file_path)
-        self._schedule_callback(coro, f"modified:{file_path}")
+        # Same key as `on_created`: both end in `on_file_changed`, and a save
+        # that produces create-then-modify should cost one hash, not two.
+        self._schedule_callback(
+            lambda: self.on_file_changed(file_path), f"changed:{file_path}"
+        )
     
     def on_deleted(self, event: FileDeletedEvent) -> None:
         """
@@ -187,8 +254,9 @@ class AsyncFileMonitor(FileSystemEventHandler):
         file_path = self._get_relative_path(event.src_path)
         logger.info(f"File deleted: {file_path}")
         
-        coro = self.on_file_deleted(file_path)
-        self._schedule_callback(coro, f"deleted:{file_path}")
+        self._schedule_callback(
+            lambda: self.on_file_deleted(file_path), f"deleted:{file_path}"
+        )
     
     def on_moved(self, event: FileMovedEvent) -> None:
         """
@@ -205,11 +273,12 @@ class AsyncFileMonitor(FileSystemEventHandler):
         logger.info(f"File moved: {src_path} -> {dest_path}")
         
         # Treat move as delete + create
-        delete_coro = self.on_file_deleted(src_path)
-        create_coro = self.on_file_changed(dest_path)
-        
-        self._schedule_callback(delete_coro, f"deleted:{src_path}")
-        self._schedule_callback(create_coro, f"created:{dest_path}")
+        self._schedule_callback(
+            lambda: self.on_file_deleted(src_path), f"deleted:{src_path}"
+        )
+        self._schedule_callback(
+            lambda: self.on_file_changed(dest_path), f"changed:{dest_path}"
+        )
 
 
 class FileMonitorManager:
