@@ -218,7 +218,12 @@ Observed results, both platforms:
 ```
 Windows:  272 passed, 25 skipped   (FUSE skipped: no /dev/fuse)
 WSL2:     290 passed,  7 skipped   (Docker skipped: no daemon in that distro)
+Windows, no Docker daemon:
+          265 passed, 32 skipped   (24 FUSE, 7 Docker, 1 symlink privilege)
 ```
+
+The last line is the floor: what passes on a machine with neither FUSE nor
+Docker (re-run 2026-11-12, 69 s).
 
 Nothing is silently excluded. Every test that cannot run on a platform skips
 with a stated reason, so the counts describe what was actually verified.
