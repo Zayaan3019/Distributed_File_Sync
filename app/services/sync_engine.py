@@ -33,7 +33,7 @@ import os
 import time
 import uuid
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 from dataclasses import dataclass, field
 import aiofiles
 import shutil
@@ -66,6 +66,10 @@ CONFLICT_INFIX = ".conflict-"
 #: a stall -- progress is measured per chunk, not for the transfer as a whole,
 #: so this only fires when the stream has genuinely stopped.
 TRANSFER_STALL_TIMEOUT = 60.0
+
+#: Sends of one tree request before giving up on it. A peer that does not
+#: have the file never replies, so retrying forever would loop.
+MAX_TREE_REQUEST_ATTEMPTS = 3
 
 
 def conflict_sibling_path(path: str, loser_node_id: str, loser_counter: int) -> str:
@@ -130,6 +134,35 @@ class FileMetadata:
     vector_clock: VectorClock
     last_modified: float = field(default_factory=time.time)
     size: int = 0
+
+
+@dataclass
+class TreeRequest:
+    """
+    A Merkle-tree request that has been sent but not yet answered.
+
+    The request is the first message of every transfer, and it is the one most
+    exposed to a dying socket: it is sent the moment a change is noticed, which
+    is exactly when a peer pair may still be settling a duplicate connection.
+    If it goes out on the connection that then loses the tie-break, the peer
+    closes that socket without reading it and the request is gone without an
+    error on either side. Until the reply arrives the request is the only trace
+    that a transfer should happen, so it is kept here and re-sent when its
+    connection dies (`SyncEngine.on_connection_lost`) or goes unanswered
+    (`SyncEngine.reap_stalled_transfers`).
+
+    Attributes:
+        peer_id: Peer the request was sent to.
+        source_path: Path as the peer knows it.
+        conn: The connection it was sent on.
+        sent_at: Monotonic timestamp of the latest send.
+        attempts: Sends so far, bounded by `MAX_TREE_REQUEST_ATTEMPTS`.
+    """
+    peer_id: str
+    source_path: str
+    conn: Any
+    sent_at: float
+    attempts: int = 1
 
 
 @dataclass
@@ -210,6 +243,8 @@ class SyncEngine:
         self.catalog = catalog
         self.file_metadata: Dict[str, FileMetadata] = {}
         self.transfers: Dict[str, PendingTransfer] = {}
+        # Tree requests sent but not yet answered, by destination path.
+        self._awaiting_trees: Dict[str, TreeRequest] = {}
         self._sync_lock = asyncio.Lock()
         self._initializing = False
         self._owns_catalog = False
@@ -968,16 +1003,49 @@ class SyncEngine:
             dest_path: Local path to write the result to, when it differs
                 from `file_path` (conflict siblings).
         """
+        dest = dest_path or file_path
         request = Message(
             msg_type=MessageType.MERKLE_TREE,
             payload={
                 'file_path': file_path,
                 'request': True,
-                'dest_hint': dest_path or file_path,
+                'dest_hint': dest,
             },
             node_id=self.config.node_id
         )
-        await Protocol.send_message(peer_conn.channel, request)
+
+        previous = self._awaiting_trees.get(dest)
+        attempts = 1
+        if previous is not None and previous.peer_id == peer_conn.peer_id \
+                and previous.source_path == file_path:
+            attempts = previous.attempts + 1
+        self._awaiting_trees[dest] = TreeRequest(
+            peer_id=peer_conn.peer_id, source_path=file_path,
+            conn=peer_conn, sent_at=time.monotonic(), attempts=attempts,
+        )
+
+        try:
+            await Protocol.send_message(peer_conn.channel, request)
+        except (ConnectionError, OSError):
+            # The usual cause is a duplicate connection that just lost the
+            # tie-break: the peer is still there, on the connection that
+            # replaced this one. Anything else is left to the reconnect and
+            # the reaper, which still have the record above.
+            current = self._live_connection(peer_conn.peer_id)
+            if current is None or current is peer_conn:
+                raise
+            logger.info(
+                f"Connection to {peer_conn.peer_id} was replaced; re-sending "
+                f"the tree request for {dest} on the new one"
+            )
+            self._awaiting_trees[dest].conn = current
+            await Protocol.send_message(current.channel, request)
+
+    def _live_connection(self, peer_id: str) -> Optional[PeerConnection]:
+        """The connection currently registered for a peer, if any."""
+        network = getattr(self, "network", None)
+        connections = getattr(network, "connections", None)
+        return connections.get(peer_id) if connections is not None else None
 
     async def _send_merkle_tree(self, file_path: str, metadata: FileMetadata,
                                 peer_conn: PeerConnection,
@@ -1040,6 +1108,7 @@ class SyncEngine:
             dest_path = sanitize_relative_path(hint)
 
         logger.info(f"Received Merkle tree for {file_path} -> {dest_path}")
+        self._awaiting_trees.pop(dest_path, None)
 
         local_metadata = self.file_metadata.get(dest_path)
 
@@ -1418,6 +1487,8 @@ class SyncEngine:
         Args:
             peer_id: Node whose connection ended.
         """
+        await self._resend_orphaned_tree_requests(peer_id)
+
         affected = [
             transfer for transfer in self.transfers.values()
             if transfer.peer_id == peer_id and transfer.expected
@@ -1449,6 +1520,34 @@ class SyncEngine:
                     f"Could not re-request {transfer.dest_path} from "
                     f"{peer_id}: {exc}"
                 )
+
+    async def _resend_orphaned_tree_requests(self, peer_id: str) -> None:
+        """
+        Re-send tree requests whose connection to `peer_id` is gone.
+
+        Only requests sent on a connection other than the live one are
+        re-sent; one already on the live connection is still in flight. With
+        no live connection the record stays, and the reaper retries it once
+        the peer is back.
+        """
+        current = self._live_connection(peer_id)
+        if current is None:
+            return
+        orphaned = [
+            (dest, req) for dest, req in self._awaiting_trees.items()
+            if req.peer_id == peer_id and req.conn is not current
+        ]
+        for dest, req in orphaned:
+            logger.info(
+                f"Tree request for {dest} was sent on a connection to "
+                f"{peer_id} that has closed; re-sending"
+            )
+            try:
+                await self._request_merkle_tree(
+                    req.source_path, current, dest_path=dest,
+                )
+            except Exception as exc:
+                logger.warning(f"Could not re-send the request for {dest}: {exc}")
 
     async def reap_stalled_transfers(
             self, timeout: float = TRANSFER_STALL_TIMEOUT) -> List[str]:
@@ -1482,6 +1581,27 @@ class SyncEngine:
             Destination paths that were abandoned.
         """
         now = time.monotonic()
+
+        # Tree requests that never got a reply (lost with their connection, or
+        # the peer was away). Re-ask a bounded number of times.
+        for dest, req in list(self._awaiting_trees.items()):
+            if now - req.sent_at <= timeout:
+                continue
+            if req.attempts >= MAX_TREE_REQUEST_ATTEMPTS:
+                logger.warning(
+                    f"No reply to the tree request for {dest} from "
+                    f"{req.peer_id} after {req.attempts} attempts; giving up"
+                )
+                self._awaiting_trees.pop(dest, None)
+                continue
+            conn = self._live_connection(req.peer_id)
+            if conn is None:
+                continue
+            try:
+                await self._request_merkle_tree(req.source_path, conn, dest_path=dest)
+            except Exception as exc:
+                logger.warning(f"Could not re-send the request for {dest}: {exc}")
+
         stalled = [
             transfer for transfer in self.transfers.values()
             if transfer.expected and now - transfer.last_progress > timeout

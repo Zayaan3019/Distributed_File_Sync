@@ -8,6 +8,7 @@ exponential backoff for retries.
 
 import asyncio
 import logging
+import random
 from typing import Dict, Optional, Set, Callable, Awaitable
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -18,6 +19,15 @@ from ..core.security import Authenticator, AuthenticationError, SecureChannel
 
 logger = logging.getLogger(__name__)
 
+
+
+def _jittered(delay: float) -> float:
+    """A delay drawn uniformly from [delay/2, delay] ("equal jitter").
+
+    Keeps at least half the backoff, so retries still slow down, but spreads
+    peers that failed together so they don't retry in lock-step.
+    """
+    return delay * random.uniform(0.5, 1.0)
 
 @dataclass
 class PeerConnection:
@@ -466,7 +476,7 @@ class NetworkManager:
 
             # Back off before redialling. Without this a peer that accepts and
             # immediately closes would spin this loop at full speed.
-            await asyncio.sleep(self.config.retry_delay)
+            await asyncio.sleep(_jittered(self.config.retry_delay))
 
     async def _connect_to_peer(self, peer: PeerConfig) -> bool:
         """
@@ -594,8 +604,10 @@ class NetworkManager:
                 logger.warning(f"Failed to connect to {peer_key} (attempt {retries}/{self.config.max_retries}): {e}")
                 
                 if retries < self.config.max_retries:
-                    # Exponential backoff
-                    await asyncio.sleep(retry_delay)
+                    # Exponential backoff with jitter. Two peers that lose each
+                    # other at the same moment would otherwise redial in
+                    # lock-step on every attempt.
+                    await asyncio.sleep(_jittered(retry_delay))
                     retry_delay = min(retry_delay * 2, 60.0)  # Cap at 60 seconds
                     self._retry_delays[peer_key] = retry_delay
                 else:
